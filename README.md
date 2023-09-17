@@ -63,4 +63,211 @@ Using this analysis approach - answer the following questions:
 - What about the entire 12 weeks before and after?
 - How do the sales metrics for these 2 periods before and after compare with the previous years in 2018 and 2019?
 
+## SQL syntax solutions
 
+-- Question 1
+
+CREATE TABLE cleaned_weekly_sales AS 
+SELECT *,
+TO_CHAR(week_date, 'WW') AS week_number,
+EXTRACT('month' FROM week_date) AS month_number,
+EXTRACT('year'FROM week_date) AS calendar_year,
+CASE 
+	WHEN RIGHT(segment,1)='1' THEN 'Young Adults'
+	WHEN RIGHT(segment,1)='2' THEN 'Middle Aged'
+	WHEN RIGHT(segment,1) IN ('3','4') THEN 'Retirees'
+	ELSE segment END AS age_band,
+CASE 
+	WHEN LEFT(segment,1)='C' THEN 'Couples'
+	WHEN LEFT(segment,1)='F' THEN 'Families'
+	ELSE segment END AS demographic,
+ROUND(sales/transactions::NUMERIC,2) AS avg_transaction
+FROM (
+	SELECT CONCAT('20'||SPLIT_PART(week_date,'/',3),
+			'-',SPLIT_PART(week_date,'/',2),
+			'-',SPLIT_PART(week_date,'/',1)
+			)::DATE AS week_date,
+	region,
+	platform,
+	CASE WHEN segment = 'null' OR segment IS NULL THEN 'unknown'
+	ELSE segment END AS segment,
+	customer_type,
+	transactions,
+	sales
+	FROM data_mart.weekly_sales 
+) AS clean_weekdate;
+
+-- Question 2a
+
+SELECT DISTINCT TO_CHAR(week_date, 'day') AS day_of_week
+FROM cleaned_weekly_sales;
+
+-- Question 2b
+
+SELECT * FROM GENERATE_SERIES(1,53) AS missing_week_numbers
+WHERE missing_week_numbers NOT IN (
+  		SELECT DISTINCT cws.week_number FROM clean_weekly_sales cws) 
+ORDER BY missing_week_numbers;
+
+-- Question 2c
+
+SELECT calendar_year, sum(transactions) AS total_transactions
+FROM cleaned_weekly_sales
+GROUP BY calendar_year
+ORDER BY total_transactions;
+
+-- Question 2d
+
+SELECT region, 
+DATE_TRUNC('month', week_date) AS month,
+SUM(sales) AS total_sales
+FROM cleaned_weekly_sales
+GROUP BY 1,2 ORDER BY 1,2;
+
+-- Question 2e
+
+SELECT platform, 
+SUM(transactions) AS total_transactions
+FROM cleaned_weekly_sales
+GROUP BY 1;
+
+-- Question 2f
+
+SELECT *,
+ROUND(shopify_sales/total_sales::NUMERIC,2) AS shopify_percent,
+ROUND(retail_sales/total_sales::NUMERIC,2) AS retail_percent
+FROM (
+	SELECT 
+	DATE_TRUNC('month', week_date) AS month,
+	SUM(CASE WHEN platform = 'Shopify' THEN sales END) AS shopify_sales,
+	SUM(CASE WHEN platform = 'Retail' THEN sales END) AS retail_sales,
+	SUM(sales) AS total_sales
+	FROM cleaned_weekly_sales
+	GROUP BY 1 ORDER BY 1) AS sales_split;
+
+-- Question 2g
+
+SELECT *,
+ROUND(couples_sales/total_sales::NUMERIC,2) AS couples_percent,
+ROUND(family_sales/total_sales::NUMERIC,2) AS family_percent,
+ROUND(unknown_sales/total_sales::NUMERIC,2) AS unknown_percent
+FROM (
+	SELECT 
+	EXTRACT(YEAR FROM week_date) AS year,
+	SUM(CASE WHEN demographic = 'Couples' THEN sales END) AS couples_sales,
+	SUM(CASE WHEN demographic = 'Families' THEN sales END) AS family_sales,
+	SUM(CASE WHEN demographic = 'unknown' THEN sales END) AS unknown_sales,
+	SUM(sales) AS total_sales
+	FROM cleaned_weekly_sales
+	GROUP BY 1 ORDER BY 1) AS sales_split;
+
+-- Question 2h
+
+SELECT CONCAT(demographic, '-', age_band) AS demographic_age,
+SUM(sales) AS total_sales,
+RANK() OVER (ORDER BY SUM(sales) DESC) AS most_contribution
+FROM cleaned_weekly_sales
+WHERE platform = 'Retail'
+GROUP BY 1 ORDER BY 2 DESC;
+
+-- Question 2i
+
+SELECT calendar_year, platform, 
+  ROUND(AVG(avg_transaction), 2),
+  ROUND(SUM(sales)::NUMERIC/SUM(transactions), 2) AS proper_avg_transactions
+FROM cleaned_weekly_sales
+GROUP BY calendar_year, platform 
+ORDER BY calendar_year, platform;
+
+-- Question 3a
+
+WITH four_weeks_before AS (
+  SELECT DISTINCT week_date
+  FROM cleaned_weekly_sales
+  WHERE week_date BETWEEN (TO_DATE(‘2020–06–15’, ‘yy/mm/dd’) — interval ‘4 weeks’) 
+  AND (TO_DATE(‘2020–06–15’, ‘yy/mm/dd’) — interval ‘1 week’)
+),
+four_weeks_after AS (
+  SELECT DISTINCT week_date
+  FROM cleaned_weekly_sales
+  WHERE week_date BETWEEN TO_DATE(‘2020–06–15’, ‘yy/mm/dd’) AND 
+  (TO_DATE(‘2020–06–15’, ‘yy/mm/dd’) + interval ‘3 weeks’) 
+),
+summations AS (
+  SELECT SUM(CASE 
+        WHEN week_date in (select * from four_weeks_before) THEN sales 
+      END
+    ) AS four_weeks_before,
+    SUM(CASE 
+        WHEN week_date in (select * from four_weeks_after) THEN sales 
+      	END) AS four_weeks_after
+  FROM cleaned_weekly_sales)
+SELECT *,
+  four_weeks_after — four_weeks_before AS variance,
+  ROUND(
+    100 * (four_weeks_after - four_weeks_before)::numeric/four_weeks_before, 2
+  ) AS percentage_change
+FROM summations;
+
+-- Question 3b
+
+WITH twelve_weeks_before AS (
+  SELECT DISTINCT week_date
+  FROM cleaned_weekly_sales
+  WHERE week_date BETWEEN 
+    (TO_DATE(‘2020–06–15’, ‘yy/mm/dd’) — interval ’12 weeks’) AND 
+    (TO_DATE(‘2020–06–15’, ‘yy/mm/dd’) — interval ‘1 week’)
+  ),
+  twelve_weeks_after AS (
+  SELECT DISTINCT week_date
+  FROM cleaned_weekly_sales
+  WHERE week_date BETWEEN 
+    TO_DATE(‘2020–06–15’, ‘yy/mm/dd’) AND 
+    (TO_DATE(‘2020–06–15’, ‘yy/mm/dd’) + interval ’11 weeks’) 
+  ),
+  summations AS (
+  SELECT SUM(
+      CASE 
+        WHEN week_date in (select * from twelve_weeks_before) THEN sales 
+      END
+    ) AS twelve_weeks_before,
+  SUM(
+      CASE 
+        WHEN week_date in (select * from twelve_weeks_after) THEN sales 
+      END
+    ) AS twelve_weeks_after
+  FROM cleaned_weekly_sales
+  )
+SELECT *,
+  twelve_weeks_after - twelve_weeks_before AS variance,
+  ROUND(100 * (twelve_weeks_after - twelve_weeks_before)::numeric/twelve_weeks_before, 2) AS percentage_change
+FROM summations;
+
+-- Question 3c
+
+WITH cte AS (
+  SELECT DISTINCT week_number FROM cleaned_weekly_sales
+  WHERE week_date = '2020-06-15'
+ ),
+ four_weeks_before AS (
+  SELECT DISTINCT week_date
+  FROM cleaned_weekly_sales
+  WHERE week_number BETWEEN (SELECT week_number FROM cte) - 4 AND (SELECT week_number FROM cte) - 1
+ ),
+ four_weeks_after AS (
+  SELECT DISTINCT week_date
+  FROM cleaned_weekly_sales
+  WHERE week_number BETWEEN (SELECT week_number FROM cte) AND (SELECT week_number FROM cte) + 3
+ ),
+ summations AS (
+  SELECT calendar_year, SUM(CASE WHEN week_date IN (SELECT * FROM four_weeks_before) THEN sales END) AS four_weeks_before,
+  SUM(CASE WHEN week_date IN (SELECT * FROM four_weeks_after) THEN sales END) AS four_weeks_after
+  FROM cleaned_weekly_sales
+  GROUP BY calendar_year
+ )
+ SELECT *,
+  four_weeks_after - four_weeks_before AS variance,
+  ROUND(100 * (four_weeks_after - four_weeks_before)::numeric/four_weeks_before, 2) AS percentage_change
+ FROM summations
+ ORDER BY calendar_year;
+ 
